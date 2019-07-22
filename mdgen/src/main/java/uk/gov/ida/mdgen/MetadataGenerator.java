@@ -32,18 +32,23 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.yaml.snakeyaml.Yaml;
 import picocli.CommandLine;
+import picocli.CommandLine.ArgGroup;
 import se.litsec.opensaml.utils.ObjectUtils;
 
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.OutputStream;
 import java.io.StringWriter;
 import java.security.KeyStore;
 import java.security.PrivateKey;
 import java.security.Provider;
+import java.security.PublicKey;
 import java.security.Security;
+import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.security.interfaces.ECPublicKey;
 import java.util.Map;
@@ -76,10 +81,7 @@ public class MetadataGenerator implements Callable<Void> {
     @CommandLine.Parameters(index = "1", description = "YAML definition file")
     private File yamlFile;
 
-    @CommandLine.Parameters(index = "2", description = "Public X509 cert for saml signing")
-    private File samlSigningCertFile;
-
-    @CommandLine.Parameters(index = "3", description = "Public X509 cert for metadata signing")
+    @CommandLine.Parameters(index = "2", description = "Public X509 cert for metadata signing")
     private File metadataSigningCertFile;
 
     @CommandLine.Option(names = "--output", description = "Output metadata file")
@@ -94,8 +96,19 @@ public class MetadataGenerator implements Callable<Void> {
     @CommandLine.Option(names = "--hsm-metadata-signing-label", description = "HSM Metadata key label")
     private String hsmMetadataKeyLabel = "private_key";
 
-    @CommandLine.Option(names = "--saml-encryption-cert", description = "Public X509 cert for metadata encryption if required")
-    private File samlEncryptionCertFile;
+    @ArgGroup(exclusive = true, multiplicity = "1")
+    SamlSigningCert samlSigningCert;
+
+    static class SamlSigningCert {
+        @CommandLine.Option(names = "--hsm-saml-signing-cert-file", description = "Public X509 cert for saml signing")
+        private static File samlSigningCertFile;
+
+        @CommandLine.Option(names = "--supplied-saml-signing-cert-file", description = "File containing the cert to insert")
+        private static File embedSamlSigningCert;
+    }
+
+    @CommandLine.Option(names = "--supplied-saml-encryption-cert-file", description = "File containing the cert to insert")
+    private File embedSamlEncryptionCert;
 
     public static void main(String[] args) throws InitializationException {
         InitializationService.initialize();
@@ -104,16 +117,19 @@ public class MetadataGenerator implements Callable<Void> {
 
     @Override
     public Void call() throws Exception {
-        X509Certificate samlSigningCert = X509Support.decodeCertificate(samlSigningCertFile);
-        X509Certificate samlEncCert = X509Support.decodeCertificate(samlEncryptionCertFile);
-        X509Certificate metadataSigningCert = X509Support.decodeCertificate(metadataSigningCertFile);
-
         if (signingAlgo == SigningAlgoType.rsapss) {
             Security.addProvider(new BouncyCastleProvider());
         }
 
+        if (SamlSigningCert.samlSigningCertFile != null) {
+            X509Certificate samlSigningCert = X509Support.decodeCertificate(SamlSigningCert.samlSigningCertFile);
+            samlSigningCredential = getSigningCredentialFromCloudHSM(samlSigningCert, hsmSigningKeyLabel);
+        }
+
+        X509Certificate metadataSigningCert = X509Support.decodeCertificate(metadataSigningCertFile);
+
         setSecurityProvider();
-        samlSigningCredential = getSigningCredentialFromCloudHSM(samlSigningCert, hsmSigningKeyLabel);
+
         metadataSigningCredential = getSigningCredentialFromCloudHSM(metadataSigningCert, hsmMetadataKeyLabel);
 
         if (metadataSigningCredential.getPublicKey() instanceof ECPublicKey) {
@@ -189,13 +205,29 @@ public class MetadataGenerator implements Callable<Void> {
         SignatureValidator.validate(entityDescriptor.getSignature(), metadataSigningCredential);
     }
 
-    private void updateSsoDescriptor(EntityDescriptor entityDescriptor) throws SecurityException {
+    private void updateSsoDescriptor(EntityDescriptor entityDescriptor) throws SecurityException, CertificateException {
         switch (nodeType) {
             case connector:
                 SPSSODescriptor spSso = entityDescriptor.getSPSSODescriptor(SAMLConstants.SAML20P_NS);
-                spSso.getKeyDescriptors().add(buildKeyDescriptor(UsageType.SIGNING, samlSigningCredential));
-                // TODO use a separate encryption cert
-                spSso.getKeyDescriptors().add(buildKeyDescriptor(UsageType.ENCRYPTION, samlSigningCredential));
+                if (SamlSigningCert.embedSamlSigningCert != null) {
+                    X509Certificate cer = X509Support.decodeCertificate(SamlSigningCert.embedSamlSigningCert);
+                    BasicX509Credential credential = new BasicX509Credential(cer);
+                    spSso.getKeyDescriptors().add(buildKeyDescriptor(UsageType.SIGNING, credential));
+
+                } else {
+                    spSso.getKeyDescriptors().add(buildKeyDescriptor(UsageType.SIGNING, samlSigningCredential));
+                }
+
+                if (embedSamlEncryptionCert != null) {
+                    X509Certificate cer = X509Support.decodeCertificate(embedSamlEncryptionCert);
+                    BasicX509Credential credential = new BasicX509Credential(cer);
+                    spSso.getKeyDescriptors().add(buildKeyDescriptor(UsageType.ENCRYPTION, credential));
+
+                } else {
+                    // TODO use a separate encryption cert
+                    spSso.getKeyDescriptors().add(buildKeyDescriptor(UsageType.ENCRYPTION, samlSigningCredential));
+                }
+
                 break;
 
             case proxy:

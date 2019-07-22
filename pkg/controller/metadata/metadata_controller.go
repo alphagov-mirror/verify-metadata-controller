@@ -267,6 +267,7 @@ func (r *ReconcileMetadata) generateMetadataSecretData(instance *verifyv1beta1.M
 		SAMLEncryptionCert:      samlEncryptionCert,
 		MetadataSigningKeyLabel: string(metadataSigningKeyLabel),
 		SamlSigningKeyLabel:     string(samlSigningKeyLabel),
+		HSMSAMLSigning:          signingCertFromCertRequest,
 		HSMCreds: hsm.Credentials{
 			IP:         string(metadataHSMIP),
 			User:       string(metadataHSMUser),
